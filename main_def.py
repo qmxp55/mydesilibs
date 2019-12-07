@@ -9,8 +9,10 @@ import astropy.units as units
 from astropy import units as u
 import pandas as pd
 from astropy.io import ascii
-from photometric_def import get_stars, get_galaxies
+from photometric_def import get_stars, get_galaxies, masking, results
 from scipy import optimize
+import pygraphviz as pgv
+from PIL import Image
 
 import raichoorlib
 np.seterr(divide='ignore') # ignode divide by zero warnings
@@ -192,7 +194,7 @@ def cut_sweeps(ramin, ramax, decmin, decmax, sweep_dir, rlimit=None):
     
     return cat
 
-def get_random(N=3, sweepsize=None, dr='dr8'):
+def get_random(N=3, sweepsize=None, dr='dr8', dirpath='/global/cscratch1/sd/qmxp55/'):
     
     import time
     start = time.time()
@@ -204,7 +206,6 @@ def get_random(N=3, sweepsize=None, dr='dr8'):
     import glob
     #ranpath = '/global/project/projectdirs/desi/target/catalogs/dr7.1/0.29.0/' #issues with MASKBITS...
     
-    dirpath = '/global/cscratch1/sd/qmxp55/'
     random_file_name = '%s_random_N%s' %(dr, str(N))
         
     random_file = os.path.isfile(dirpath+random_file_name+'.npy')
@@ -471,7 +472,7 @@ def get_bgs(df):
     return bgs
 
 
-def get_sweep_whole(dr='dr8-south', rlimit=None, maskbitsource=False, bgsbits=False, opt='1'):
+def get_sweep_whole(dr='dr8-south', rlimit=None, maskbitsource=False, bgsbits=False, opt='1', sweepdir='/global/cscratch1/sd/qmxp55/sweep_files/'):
     """
     Extract data from DECaLS DR7 SWEEPS files only.
     
@@ -498,7 +499,6 @@ def get_sweep_whole(dr='dr8-south', rlimit=None, maskbitsource=False, bgsbits=Fa
     if len(namelab): sweep_file_name = '%s_sweep_whole_%s' %(dr, '_'.join(namelab))
     else: sweep_file_name = '%s_sweep_whole' %(dr)
         
-    sweepdir = '/global/cscratch1/sd/qmxp55/sweep_files/'
     sweep_file = os.path.isfile(sweepdir+sweep_file_name+'.npy')
     sweep_dir_dr7 = os.path.join('/global/project/projectdirs/cosmo/data/legacysurvey/','dr7', 'sweep', '7.1')
     sweep_dir_dr8south = '/global/project/projectdirs/cosmo/data/legacysurvey/dr8/south/sweep/8.0'
@@ -670,7 +670,8 @@ def bgsmask():
 
 def get_dict(cat=None, randoms=None, pixmapfile=None, hppix_ran=None, hppix_cat=None, maskrand=None, maskcat=None, 
                  getnobs=False, nside=None, npix=None, nest=None, pixarea=None, Nranfiles=None, 
-                     ranindesi=None, catindesi=None, dec_resol_ns=32.375, namesels=None, galb=None, survey='main', desifootprint=True):
+                     ranindesi=None, catindesi=None, dec_resol_ns=32.375, namesels=None, galb=None, survey='main', 
+                         desifootprint=True, target_outputs=True, log=False, tiledir='/global/cscratch1/sd/raichoor/'):
 
    # start = raichoorlib.get_date()
     # creating dictionary
@@ -684,9 +685,6 @@ def get_dict(cat=None, randoms=None, pixmapfile=None, hppix_ran=None, hppix_cat=
         pixarea      = hp.nside2pixarea(nside,degrees=True)
     else: raise ValueErro('if not pixel information given, include pixmapfile to compute them.')
     
-    if (cat is None) or (pixmapfile is None) or (namesels is None) or (Nranfiles is None):
-        raise ValueError('cat, pixmapfile, namesels and Nranfiles can not be None.')
-    
     if (getnobs) and (randoms is None):
         raise ValueError('random catalogue can not be None when getnobs is set True.')
         
@@ -695,20 +693,11 @@ def get_dict(cat=None, randoms=None, pixmapfile=None, hppix_ran=None, hppix_cat=
     elif (hppix_ran is None) and (randoms is None):
         raise ValueError('include a random catalogue to compute their hp pixels indexes.')
         
-    if (hppix_cat is None):
-        hppix_cat = hp.ang2pix(nside,(90.-cat['DEC'])*np.pi/180.,cat['RA']*np.pi/180.,nest=nest) # catalogue hp pixels array
-    
     if (ranindesi is None) and (randoms is not None):
-        ranindesi = get_isdesi(randoms['RA'],randoms['DEC']) # True if is in desi footprint
+        ranindesi = get_isdesi(randoms['RA'],randoms['DEC'], tiledir=tiledir) # True if is in desi footprint
     elif (ranindesi is None) and (randoms is None):
         raise ValueError('include a random catalogue to compute ranindesi.')
         
-    if (catindesi is None):
-        catindesi = get_isdesi(cat['RA'],cat['DEC']) # True is is in desi footprint
-        
-    if galb is None:
-        c = SkyCoord(cat['RA']*units.degree,cat['DEC']*units.degree, frame='icrs')
-        galb = c.galactic.b.value # galb coordinate
         
     theta,phi  = hp.pix2ang(nside,np.arange(npix),nest=nest)
     hpdict['ra'],hpdict['dec'] = 180./np.pi*phi,90.-180./np.pi*theta
@@ -716,8 +705,8 @@ def get_dict(cat=None, randoms=None, pixmapfile=None, hppix_ran=None, hppix_cat=
     hpdict['gall'],hpdict['galb'] = c.galactic.l.value,c.galactic.b.value
 
     # is in desi tile?
-    hpdict['isdesi'] = get_isdesi(hpdict['ra'],hpdict['dec'])
-    print('positions and desifotprint DONE...')
+    hpdict['isdesi'] = get_isdesi(hpdict['ra'],hpdict['dec'], tiledir=tiledir)
+    if log: print('positions and desifotprint DONE...')
 
     # propagating some keys from ADM pixweight
     hdu = fits.open(pixmapfile)
@@ -734,11 +723,11 @@ def get_dict(cat=None, randoms=None, pixmapfile=None, hppix_ran=None, hppix_cat=
             hpdict[key.lower()] = 22.5-2.5*np.log10(5./np.sqrt(data[key]))
         else:
             hpdict[key.lower()] = data[key]
-    print('systematics DONE...')
+    if log: print('systematics DONE...')
         
     # computing fracareas
     randdens = 5000*Nranfiles
-    print('randdens = ', randdens, ' ; len randoms = ', len(hppix_ran))
+    if log: print('randdens = ', randdens, ' ; len randoms = ', len(hppix_ran))
     if desifootprint: mainfootprint = ranindesi
     else: mainfootprint = np.ones_like(hppix_ran, dtype='?')
     if maskrand is None:
@@ -747,7 +736,7 @@ def get_dict(cat=None, randoms=None, pixmapfile=None, hppix_ran=None, hppix_cat=
         ind,c           = np.unique(hppix_ran[(maskrand) & (mainfootprint)],return_counts=True)
     hpdict['bgsfracarea']      = np.zeros(npix)
     hpdict['bgsfracarea'][ind] = c / randdens / pixarea
-    print('bgsfracarea DONE...')
+    if log: print('bgsfracarea DONE...')
     
     # computing nobs
     if getnobs:
@@ -761,7 +750,7 @@ def get_dict(cat=None, randoms=None, pixmapfile=None, hppix_ran=None, hppix_cat=
             hpdict[i] = np.zeros(npix)
             for j in d.keys():
                 hpdict[i][j] = np.mean(randoms[i][d[j]])
-        print('nobs DONE...')
+        if log: print('nobs DONE...')
         
     # north/south/des/decals
     hpdict['issouth'] = np.zeros(npix,dtype=bool)
@@ -773,78 +762,90 @@ def get_dict(cat=None, randoms=None, pixmapfile=None, hppix_ran=None, hppix_cat=
     hpdict['isdes']   = raichoorlib.get_isdes(hpdict['ra'],hpdict['dec'])
     hpdict['isdecals'] = (hpdict['issouth']) & (~hpdict['isdes'])
     hpdict['istest'] = (hpdict['ra'] > 160.) & (hpdict['ra'] < 230.) & (hpdict['dec'] > -2.) & (hpdict['dec'] < 18.)
-    print('regions DONE...')
+    if log: print('regions DONE...')
 
     # areas
     hpdict['area_all']   = hpdict['bgsfracarea'].sum() * pixarea
     for reg in ['south','decals','des','north', 'test']:
         hpdict['bgsarea_'+reg]   = hpdict['bgsfracarea'][hpdict['is'+reg]].sum() * pixarea
-    print('areas DONE...')
+    if log: print('areas DONE...')
+    
     
     #target densities
-    #namesels = {'any':-1, 'bright':1, 'faint':0, 'wise':2}
-    for foot in ['north','south']:
+    if target_outputs:
         
-        data = cat
+        if (cat is None) or (pixmapfile is None) or (namesels is None) or (Nranfiles is None):
+            raise ValueError('cat, pixmapfile, namesels and Nranfiles can not be None.')
         
-        if (foot=='north'): keep = (data['DEC']>dec_resol_ns) & (galb>0)
-        if (foot=='south'): keep = (data['DEC']<dec_resol_ns) | (galb<0)        
-        ##
-        if maskcat is None: keep &= catindesi
-        else: keep &= (maskcat) & (catindesi)
+        if (hppix_cat is None):
+            hppix_cat = hp.ang2pix(nside,(90.-cat['DEC'])*np.pi/180.,cat['RA']*np.pi/180.,nest=nest) # catalogue hp pixels array
         
-        if survey == 'main': bgstargetname = 'BGS_TARGET'
-        elif survey == 'sv1': bgstargetname = 'SV1_BGS_TARGET'
-        elif survey == 'bgs': bgstargetname = 'BGSBITS'
+        if (catindesi is None):
+            catindesi = get_isdesi(cat['RA'],cat['DEC'], tiledir=tiledir) # True is is in desi footprint
+        
+        if galb is None:
+            c = SkyCoord(cat['RA']*units.degree,cat['DEC']*units.degree, frame='icrs')
+            galb = c.galactic.b.value # galb coordinate
+        
+        #namesels = {'any':-1, 'bright':1, 'faint':0, 'wise':2}
+        for foot in ['north','south']:
+        
+            data = cat
+        
+            if (foot=='north'): keep = (data['DEC']>dec_resol_ns) & (galb>0)
+            if (foot=='south'): keep = (data['DEC']<dec_resol_ns) | (galb<0)        
+            ##
+            if maskcat is None: keep &= catindesi
+            else: keep &= (maskcat) & (catindesi)
+        
+            if survey == 'main': bgstargetname = 'BGS_TARGET'
+            elif survey == 'sv1': bgstargetname = 'SV1_BGS_TARGET'
+            elif survey == 'bgs': bgstargetname = 'BGSBITS'
 
-        for namesel, bitnum in zip(namesels.keys(), namesels.values()):
-            print('computing for ', foot, '/', namesel)
-            if (namesel=='any'):             sel = np.ones(len(data),dtype=bool)
-            else:                            sel = ((data[bgstargetname] & 2**(bitnum)) != 0)
+            for namesel, bitnum in zip(namesels.keys(), namesels.values()):
+                if log: print('computing for ', foot, '/', namesel)
+                if (namesel=='any'):             sel = np.ones(len(data),dtype=bool)
+                else:                            sel = ((data[bgstargetname] & 2**(bitnum)) != 0)
             
-            ind,c = np.unique(hppix_cat[(sel) & (keep)],return_counts=True)
-            hpdict[foot+'_n'+namesel]      = np.zeros(npix)
-            hpdict[foot+'_n'+namesel][ind] = c
-        print('target densities in %s DONE...' %(foot))
+                ind,c = np.unique(hppix_cat[(sel) & (keep)],return_counts=True)
+                hpdict[foot+'_n'+namesel]      = np.zeros(npix)
+                hpdict[foot+'_n'+namesel][ind] = c
+            if log: print('target densities in %s DONE...' %(foot))
             
-    # storing mean hpdens
-    isdesi = (hpdict['isdesi']) & (hpdict['bgsfracarea']>0)
-    for namesel in namesels.keys():
-        ## south + north density
-        hpdens = (hpdict['south_n'+namesel] + hpdict['north_n'+namesel] ) / (pixarea * hpdict['bgsfracarea'])
-        ## split per region
-        for reg in ['all','des','decals','north', 'south', 'test']:
-            if (reg=='all'):
-                hpdict['meandens_'+namesel+'_'+reg] = np.nanmean(hpdens[isdesi])
-            else:
-                hpdict['meandens_'+namesel+'_'+reg] = np.nanmean(hpdens[(isdesi) & (hpdict['is'+reg])])
-            print('meandens_'+namesel+'_'+reg+' = '+'%.0f'%hpdict['meandens_'+namesel+'_'+reg]+' /deg2')
+        # storing mean hpdens
+        isdesi = (hpdict['isdesi']) & (hpdict['bgsfracarea']>0)
+        for namesel in namesels.keys():
+            ## south + north density
+            hpdens = (hpdict['south_n'+namesel] + hpdict['north_n'+namesel] ) / (pixarea * hpdict['bgsfracarea'])
+            ## split per region
+            for reg in ['all','des','decals','north', 'south', 'test']:
+                if (reg=='all'):
+                    hpdict['meandens_'+namesel+'_'+reg] = np.nanmean(hpdens[isdesi])
+                else:
+                    hpdict['meandens_'+namesel+'_'+reg] = np.nanmean(hpdens[(isdesi) & (hpdict['is'+reg])])
+                if log: print('meandens_'+namesel+'_'+reg+' = '+'%.0f'%hpdict['meandens_'+namesel+'_'+reg]+' /deg2')
             
-    # storing total target density
-    isdesi = (hpdict['isdesi']) & (hpdict['bgsfracarea']>0)
-    for namesel in namesels.keys():
-        ## split per region
-        for reg in ['all','des','decals','north', 'south', 'test']:
-            if (reg=='all'):
-                hpdict['dens_'+namesel+'_'+reg] = (hpdict['south_n'+namesel][isdesi] + hpdict['north_n'+namesel][isdesi]).sum() / (pixarea * hpdict['bgsfracarea'][isdesi].sum())
-            else:
-                hpdict['dens_'+namesel+'_'+reg] = (hpdict['south_n'+namesel][(isdesi) & (hpdict['is'+reg])] + hpdict['north_n'+namesel][(isdesi) & (hpdict['is'+reg])]).sum() / (pixarea * hpdict['bgsfracarea'][(isdesi) & (hpdict['is'+reg])].sum())
-            print('dens_'+namesel+'_'+reg+' = '+'%.0f'%hpdict['dens_'+namesel+'_'+reg]+' /deg2')
-        
-    #end = raichoorlib.get_date()
-    #print('start:', start)
-    #print('end:', end)
+        # storing total target density
+        isdesi = (hpdict['isdesi']) & (hpdict['bgsfracarea']>0)
+        for namesel in namesels.keys():
+            ## split per region
+            for reg in ['all','des','decals','north', 'south', 'test']:
+                if (reg=='all'):
+                    hpdict['dens_'+namesel+'_'+reg] = (hpdict['south_n'+namesel][isdesi] + hpdict['north_n'+namesel][isdesi]).sum() / (pixarea * hpdict['bgsfracarea'][isdesi].sum())
+                else:
+                    hpdict['dens_'+namesel+'_'+reg] = (hpdict['south_n'+namesel][(isdesi) & (hpdict['is'+reg])] + hpdict['north_n'+namesel][(isdesi) & (hpdict['is'+reg])]).sum() / (pixarea * hpdict['bgsfracarea'][(isdesi) & (hpdict['is'+reg])].sum())
+                if log: print('dens_'+namesel+'_'+reg+' = '+'%.0f'%hpdict['dens_'+namesel+'_'+reg]+' /deg2')
     
     return hpdict
 
 # is in desi nominal footprint? (using tile radius of 1.6 degree)
 # small test shows that it broadly works to cut on desi footprint 
-def get_isdesi(ra,dec, nest=True):
+def get_isdesi(ra,dec, nest=True, tiledir='/global/cscratch1/sd/raichoor/'):
     radius   = 1.6 # degree
     tmpnside = 16
     tmpnpix  = hp.nside2npix(tmpnside)
     # first reading desi tiles, inside desi footprint (~14k deg2)
-    hdu  = fits.open('/global/cscratch1/sd/raichoor/desi-tiles-viewer.fits')
+    hdu  = fits.open(tiledir+'desi-tiles-viewer.fits')
     data = hdu[1].data
     keep = (data['in_desi']==1)
     data = data[keep]
@@ -1025,7 +1026,7 @@ def plot_sysdens(hpdicttmp, namesel, regs, syst, mainreg, xlim=None, n=0, nx=20,
         systquant = tmpsyst[tmp] #systematics per region
         systdens  = tmpdens[tmp] #target density per region per bit
         
-        #systdens /= hpdicttmp['meandens_'+namesel+'_'+reg] #density/mean density per SessionsSessionsbit per region
+        #systdens /= hpdicttmp['meandens_'+namesel+'_'+reg] #density/mean density per bit per region
         systdens /= hpdicttmp['meandens_'+namesel+'_'+'all'] #density/mean density per bit overall desi footprint
         
         # get eta / eta_mean in nx bins
@@ -1107,3 +1108,624 @@ class linfit:
             chi += (self.yl[i]-y)**2./self.el[i]**2.
         return chi
         
+
+def get_reg(reg='decals', hppix=None):
+    ''' get an specific LS region i.e., DECaLS/DES/NORTH from catalogue with hppix index info.'''
+    
+    hpdict = np.load('/global/cscratch1/sd/qmxp55/hppixels_regions.npy')
+    isreg_pixlist = hpdict['hpxpixel'][hpdict['is'+reg]]
+    regcat = np.in1d(hppix, isreg_pixlist)
+    
+    return regcat
+
+def getStats(cat=None, hpdict=None, bgsmask=None, rancuts=None, CurrentMask=None, PrevMask=None, 
+                 reg='decals', regcat=None, regran=None):
+    
+    #from astropy.table import Table
+    Tab = []
+    GMT = np.zeros_like(regcat, dtype='?')
+    GMT_ran = np.zeros_like(regran, dtype='?')
+    PMT = GMT.copy()
+    PMT_ran = GMT_ran.copy()
+        
+    #if (regcat is not None) & (regran is not None): print('region set...')
+    #elif (regcat is None) & (regran is None): regcat, regran = ~GMT.copy(), ~GMT_ran.copy()
+    #else: raise ValueError('regcat and regran both have to be None-type or non None-type.')
+     
+    # area in region
+    Areg = hpdict['bgsarea_'+reg]
+    # Number of randoms in region
+    NRreg = np.sum(regran)
+    #
+    B, F = cat['RMAG'] < 19.5, np.logical_and(cat['RMAG'] < 20, cat['RMAG'] > 19.5)
+        
+    if PrevMask is not None:
+        PM_lab = '|'.join(PrevMask)
+        for i in PrevMask:
+            PMT |= (cat['BGSBITS'] & 2**(bgsmask[i])) == 0
+            if i in rancuts.keys(): PMT_ran |= ~rancuts[i]   
+    else:
+        PM_lab = 'None'
+    
+    for i in CurrentMask:
+        
+        if i in rancuts.keys(): A_i = (np.sum((~rancuts[i] & (~PMT_ran) & (regran)))/NRreg)*(Areg)
+        else: A_i = 0.
+        bgscut = (cat['BGSBITS'] & 2**(bgsmask[i])) == 0
+        #eta_B_i_in = np.sum((GeoCutsDict[i]) & (B) & (~PMT))/(A_i) #density over the geometric area
+        #eta_F_i_in = np.sum((GeoCutsDict[i]) & (F) & (~PMT))/(A_i) #density over the geometric area
+        eta_B_i = np.sum((bgscut) & (B) & (~PMT) & (regcat))/(Areg) #density over the total area
+        eta_F_i = np.sum((bgscut) & (F) & (~PMT) & (regcat))/(Areg) #density over the total area
+        
+        Tab.append([i, round(A_i*(100/Areg), 2), round(eta_B_i,2), round(eta_F_i,2)])
+            
+        GMT |= bgscut
+        if i in rancuts.keys(): GMT_ran |= ~rancuts[i]  
+    
+    lab = '|'.join(CurrentMask)
+    lab_in = '(%s)' %(lab)
+    lab_out = '~(%s)*' %(lab)
+    lab_out2 = '~(%s)' %(lab)
+    
+    A_GMT_in = (np.sum((GMT_ran) & (~PMT_ran) & (regran))/NRreg)*(Areg)
+    eta_B_GMT_in_1 = np.sum((GMT) & (B) & (~PMT) & (regcat))/(Areg) #Not corrected for mask area
+    eta_F_GMT_in_1 = np.sum((GMT) & (F) & (~PMT) & (regcat))/(Areg) #Not corrected for mask area
+
+    A_GMT_out = (np.sum((~GMT_ran) & (~PMT_ran) & (regran))/NRreg)*(Areg)
+    eta_B_GMT_out_1 = np.sum((~GMT) & (B) & (~PMT) & (regcat))/(Areg) #Not corrected for mask area
+    eta_B_GMT_out_2 = np.sum((~GMT) & (B) & (~PMT) & (regcat))/(A_GMT_out) #Corrected for mask area
+    eta_F_GMT_out_1 = np.sum((~GMT) & (F) & (~PMT) & (regcat))/(Areg) #Not corrected for mask area
+    eta_F_GMT_out_2 = np.sum((~GMT) & (F) & (~PMT) & (regcat))/(A_GMT_out) #Corrected for mask area
+    
+    if len(CurrentMask) > 1:
+        Tab.append([lab_in, round(A_GMT_in*(100/Areg),2), round(eta_B_GMT_in_1,2), round(eta_F_GMT_in_1,2)])
+    Tab.append([lab_out, round(A_GMT_out*(100/Areg),2), round(eta_B_GMT_out_1,2), round(eta_F_GMT_out_1,2)])
+    Tab.append([lab_out2, round(A_GMT_out*(100/Areg),2), round(eta_B_GMT_out_2,2), round(eta_F_GMT_out_2,2)])
+    
+    Tab = np.transpose(Tab)
+    t = Table([Tab[0], Tab[1], Tab[2], Tab[3]], 
+              names=('GM','$f_{A}$ [$\%$]', '$\eta_{B}$ [deg$^2$]', '$\eta_{F}$ [deg$^2$]'),
+                    dtype=('S', 'f8', 'f8', 'f8'))
+    
+    print('Previous Cuts: (%s)' %(PM_lab))
+    print('Current Cuts: %s' %(lab_in))
+                                    
+    return t
+
+
+def flow(cat=None, hpdict=None, bgsmask=None, rancuts=None, order=None, reg=None, 
+             regcat=None, regran=None, file=None):
+    
+    # add GRAPHVIZ bin files to PATH, otherwise it doesn't find them
+    os.environ['PATH'] = '/global/u2/q/qmxp55/bin'
+    
+    if order is None:
+        raise ValueError('define the order of flow chart.')
+    
+    T = Table()
+    Areg = hpdict['bgsarea_'+reg]
+    
+    B, F = cat['RMAG'] < 19.5, np.logical_and(cat['RMAG'] < 20, cat['RMAG'] > 19.5)
+    den0B = np.sum((regcat) & (B))/Areg
+    den0F = np.sum((regcat) & (F))/Areg
+    
+    #T['SU'] = masking(title='START', submasks=None, details=None)
+    #T['SG'] = masking(title='GEOMETRICAL', submasks=None, details=None)
+    T['I'] = masking(title='%s (%s)' %('LS DR8',reg.upper()), submasks=['rmag < %2.2g' %(20)], details=None)
+    T['RI'] = results(a=Areg, b=den0B, f=den0F, stage='ini', per=False)
+    
+    G=pgv.AGraph(strict=False,directed=True)
+
+    elist = []
+    rejLab = []
+    #define initial params in flow chart
+    #ini = ['SU', 'I', 'RI', 'SG']
+    ini = ['I', 'RI']
+    for i in range(len(ini) - 1):
+        elist.append((list(T[ini[i]]),list(T[ini[i+1]])))
+        
+    #G.add_edges_from(elist)
+    #stages=['SU', 'SG']
+    #G.add_nodes_from([list(T[i]) for i in stages], color='green', style='filled')
+    nlist=['RI']
+    G.add_nodes_from([list(T[i]) for i in nlist], color='lightskyblue', shape='box', style='filled')
+    maskings=['I']
+    G.add_nodes_from([list(T[i]) for i in maskings], color='lawngreen', style='filled')
+        
+    #
+    for num, sel in enumerate(order):
+        
+        T['I'+str(num)] = masking(title=' & '.join(sel), submasks=None, details=None)
+        
+        if num == 0: elist.append((list(T['I']),list(T['I'+str(num)])))
+        else: elist.append((list(T['R'+str(num-1)]),list(T['I'+str(num)])))
+            
+        if num == 0: pm = None
+        elif num == 1: pm = order[0]
+        else: pm += order[num-1]
+            
+        if len(sel) > 1: IGMLab_2 = ' | '.join(sel)
+        else: IGMLab_2 = sel[0]
+        
+        t = getStats(cat=cat, hpdict=hpdict, bgsmask=bgsmask, rancuts=rancuts, CurrentMask=sel, PrevMask=pm, 
+                 reg=reg, regcat=regcat, regran=regran)
+        
+        T['R'+str(num)] = results(a=t[-2][1], b=t[-2][2], f=t[-2][3], b2=t[-1][2], f2=t[-1][3], stage='geo', per=True)
+        T['REJ'+str(num)] = results(a=t[-3][1], b=t[-3][2], f=t[-3][3], stage='ini', per=True, title='(%s)' %(IGMLab_2))
+        
+        elist.append((list(T['I'+str(num)]),list(T['REJ'+str(num)])))
+        elist.append((list(T['I'+str(num)]),list(T['R'+str(num)])))
+        
+        if False in [i in rancuts.keys() for i in sel]: icolor = 'plum'
+        else: icolor = 'lightgray'
+        
+        Rlist=['R'+str(num)]
+        G.add_nodes_from([list(T[i]) for i in Rlist], color='lightskyblue', shape='box', style='filled')
+        REJlist=['REJ'+str(num)]
+        G.add_nodes_from([list(T[i]) for i in REJlist], color='lightcoral', shape='box', style='filled')
+        Ilist=['I'+str(num)]
+        G.add_nodes_from([list(T[i]) for i in Ilist], color=icolor, style='filled')
+
+        if len(sel) > 1:
+            for i, j in enumerate(sel):
+                T['REJ'+str(num)+str(i)] = results(a=t[i][1], b=t[i][2], f=t[i][3], stage='ini', per=True, title=j)
+                elist.append((list(T['REJ'+str(num)]),list(T['REJ'+str(num)+str(i)])))
+                
+                REJilist=['REJ'+str(num)+str(i)]
+                G.add_nodes_from([list(T[i]) for i in REJilist], color='coral', shape='box', style='filled')
+        
+    #
+    if file is None:
+        pathdir = os.getcwd()+'/'+'results'+'_'+reg
+        if not os.path.isdir(pathdir): os.makedirs(pathdir)
+        file = pathdir+'/'+'flow'
+        
+        
+    G.add_edges_from(elist)
+    G.write('%s.dot' %(file)) # write to simple.dot
+    BB=pgv.AGraph('%s.dot' %(file)) # create a new graph from file
+    BB.layout(prog='dot') # layout with default (neato)
+    BB.draw('%s.png' %(file)) # draw png
+    #os.system('convert ' + file + '.ps ' + file + '.png')
+    flow = Image.open('%s.png' %(file))
+
+    return flow, elist, T
+
+
+import matplotlib.gridspec as gridspec
+from geometric_def import circular_mask_radii_func
+
+def overdensity(cat, star, radii_1, nameMag, slitw, density=False, magbins=(8,14,4), radii_2=None, 
+                grid=None, SR=[2, 240.], scaling=False, nbins=101, SR_scaling=4, logDenRat=[-3, 3], 
+                    radii_bestfit=True, annulus=None, bintype='2', filename=None):
+    '''
+    Get scatter and density plots of objects of cat1 around objects of cat2 within a search radius in arcsec.
+
+    Inputs
+    ------
+    cat: (array) catalogue 1;
+    star: (array) catalogue 2;
+    nameMag: (string) label of magnitude in catalogue 2;
+    slitw: (float, integer) slit widht;
+    density: (boolean) True to get the density as function of distance (arcsec) within shells;
+    magbins: (integers) format to separate the magnitude bins in cat2 (min, max, number bins);
+
+    Output
+    ------
+    (distance (arcsec), density) if density=True
+    '''
+    
+    # define the slit width for estimating the overdensity off diffraction spikes
+    slit_width = slitw
+    search_radius = SR[1]
+
+    # Paramater for estimating the overdensities
+    annulus_min = SR[0]
+    annulus_max = SR[1]
+
+    ra2 = star['RA']
+    dec2 = star['DEC']
+    
+    ra1 = cat['RA']
+    dec1 = cat['DEC']
+
+    if density:
+
+        idx2, idx1, d2d, d_ra, d_dec = search_around(ra2, dec2, ra1, dec1,
+                                                 search_radius=search_radius)
+        density = []
+        shells = np.linspace(1, search_radius, search_radius)
+        for i in range(len(shells)-1):
+
+            ntot_annulus = np.sum((d2d>shells[i]) & (d2d<shells[i+1]))
+            density_annulus = ntot_annulus/(np.pi*(shells[i+1]**2 - shells[i]**2))
+            bincenter = (shells[i]+shells[i+1])/2
+
+            density.append([bincenter, density_annulus])
+
+        density = np.array(density).transpose()
+        plt.figure(figsize=(12, 8))
+        plt.semilogy(density[0], density[1])
+        plt.xlabel(r'r(arcsec)')
+        plt.ylabel(r'N/($\pi r^2$)')
+        plt.grid()
+        plt.show()
+
+        return density
+
+
+    if bintype == '2':
+        mag_bins = np.linspace(magbins[0], magbins[1], magbins[2]+1)
+        mag_bins_len = len(mag_bins)-1
+    elif bintype == '1':
+        mag_bins = np.linspace(magbins[0], magbins[1], magbins[2])
+        mag_bins_len = len(mag_bins)
+    elif bintype == '0':
+        mag_bins = np.array(magbins)
+        mag_bins_len = len(mag_bins)-1
+    else:
+        raise ValueError('Invaid bintype. Choose bintype = 0, 1, 2')
+    
+    
+    if grid is not None:
+        rows, cols = grid[0], grid[1]
+    else:
+        rows, cols = len(mag_bins), 1
+    figsize = (8*cols, 8*rows)
+    gs = gridspec.GridSpec(rows, cols)
+    gs.update(wspace=0.3, hspace=0.2)
+    fig = plt.figure(num=1, figsize=figsize)
+    ax = []
+        
+    for index in range(mag_bins_len):
+        if (bintype == '2') or (bintype == '0'):
+            mask_star = (star[nameMag]>mag_bins[index]) & (star[nameMag]<mag_bins[index+1])
+            title = '{:.2f} < {} < {:.2f}'.format(mag_bins[index], nameMag, mag_bins[index+1], np.sum(mask_star))    
+        elif bintype == '1':
+            if index==0:
+                mask_star = (star[nameMag]<mag_bins[index])
+                title = '{} < {:.2f}'.format(nameMag,mag_bins[0], np.sum(mask_star))
+            else:
+                mask_star = (star[nameMag]>mag_bins[index-1]) & (star[nameMag]<mag_bins[index])
+                title = '{:.2f} < {} < {:.2f}'.format(mag_bins[index-1], nameMag, mag_bins[index], np.sum(mask_star))
+        else:
+            raise ValueError('Invaid bintype. Choose bintype = 0, 1, 2')
+
+        print(title)
+        magminrad = circular_mask_radii_func([mag_bins[index+1]], radii_1, bestfit=radii_bestfit)[0]
+        magmaxrad = circular_mask_radii_func([mag_bins[index]], radii_1, bestfit=radii_bestfit)[0]
+
+        if not scaling:
+            #get the mask radii from the mean magnitude
+            mag_mean = np.mean(star[nameMag][mask_star])
+            print('mag_mean', mag_mean)
+            mask_radius = circular_mask_radii_func([mag_mean], radii_1, bestfit=radii_bestfit)[0]
+            if radii_2:
+                mask_radius2 = circular_mask_radii_func([mag_mean], radii_2)[0]
+
+        idx2, idx1, d2d, d_ra, d_dec = search_around(ra2[mask_star], dec2[mask_star], ra1, dec1,
+                                                 search_radius=annulus_max)
+
+        Nsources = len(ra2[mask_star])
+        perc_sources = 100*len(ra2[mask_star])/len(ra2)
+        
+        #print('%d sources ~%g %% ' %(Nsources, perc_sources))
+        
+        mag_radii = circular_mask_radii_func(star[nameMag][mask_star][idx2], radii_1, bestfit=radii_bestfit)
+        #print(len(d_ra), len(mag_radii))
+        print('mag_radii MAX:',mag_radii.max(), 'mag_radii MIN:',mag_radii.min())
+        print('mag MAX:',star[nameMag][mask_star][idx2].max(), 'mag MIN:',star[nameMag][mask_star][idx2].min())
+
+        #markersize = np.max([0.01, np.min([10, 0.3*100000/len(idx2)])])
+        #axis = [-search_radius*1.05, search_radius*1.05, -search_radius*1.05, search_radius*1.05]
+        #axScatter = scatter_plot(d_ra, d_dec, markersize=markersize, alpha=0.4, figsize=6.5, axis=axis, title=title)
+        
+        row = (index // cols)
+        col = index % cols
+        ax.append(fig.add_subplot(gs[row, col]))
+        
+        if scaling:
+            d2d_arcsec = d2d
+            d_ra, d_dec, d2d = d_ra/mag_radii, d_dec/mag_radii, d2d_arcsec/mag_radii
+            search_radius = SR_scaling #d2d.max() - d2d.max()*0.3
+            #ntot_annulus = np.sum((d2d_arcsec>annulus_min) & (d2d<search_radius))
+            ntot_annulus = np.sum(d2d<search_radius)
+            #density_annulus = ntot_annulus/(np.pi*(search_radius**2 - d2d[d2d_arcsec > 2].min()**2))
+            density_annulus = ntot_annulus/(np.pi*(search_radius**2))
+            #print('ntot_annulus:', ntot_annulus, 'density_annulus:', density_annulus)
+            print('d2d min=%2.3g, d2d max=%2.3g' %(d2d.min(), d2d.max()))
+        else:
+            d2d_arcsec = None
+            ntot_annulus = np.sum((d2d>annulus_min) & (d2d<annulus_max))
+            density_annulus = ntot_annulus/(np.pi*(annulus_max**2 - annulus_min**2))
+        
+        if annulus is not None:
+            annMask = np.ones(len(cat), dtype='?')
+            d_ra2 = np.zeros(len(cat))
+            d_dec2 = np.zeros(len(cat))
+            d_ra2[idx1] = d_ra
+            d_dec2[idx1] = d_dec
+            print(len(cat), len(d_ra2), len(d_dec2))
+            #print(len(set(idx1)), len(set(idx2)))
+            #print(idx1.max(), idx2.max())
+            #angle_array = np.linspace(0, 2*np.pi, 240)
+            annMask &= np.logical_and((d_ra2**2 + d_dec2**2) < annulus[1]**2, (d_ra2**2 + d_dec2**2) > annulus[0]**2)
+            
+            #annMask &= np.logical_and(d_dec < annulus[1] * np.cos(angle_array), d_dec > annulus[0] * np.cos(angle_array))
+        
+        if scaling:
+            mask_radius = None
+        
+        bins, mesh_d2d, density_ratio = relative_density_plot(d_ra, d_dec, d2d, search_radius,
+                        ref_density=density_annulus, return_res=True, show=False, nbins=nbins, 
+                            ax=ax[-1], d2d_arcsec=d2d_arcsec, annulus_min=annulus_min, 
+                                logDenRat=logDenRat, mask_radius=magmaxrad)
+   
+        if not scaling:
+            angle_array = np.linspace(0, 2*np.pi, 240)
+            for i in [magminrad, magmaxrad]:
+                x = i * np.sin(angle_array)
+                y = i * np.cos(angle_array)
+                ax[-1].plot(x, y, 'k', lw=2)
+            
+            ax[-1].text(-annulus_max+annulus_max*0.02, annulus_max-annulus_max*0.05, '%d sources ~%2.3g %% ' %(Nsources, perc_sources), fontsize=8,color='k')
+            ax[-1].text(-annulus_max+annulus_max*0.02, annulus_max-annulus_max*0.11, '%d objects ~%2.3g %% ' %(ntot_annulus, 100*ntot_annulus/len(ra1)), fontsize=8,color='k')
+            #ax[-1].text(-annulus_max+annulus_max*0.02, annulus_max-annulus_max*0.17, '$\eta$=%2.3g arcsec$^{-2}$' %(density_annulus), fontsize=8,color='k')
+
+            ax[-1].set_xlabel(r'$\Delta$RA (arcsec)')
+            ax[-1].set_ylabel(r'$\Delta$DEC (arcsec)')
+        
+            if radii_2:
+                x2 = mask_radius2 * np.sin(angle_array)
+                y2 = mask_radius2 * np.cos(angle_array)
+                ax[-1].plot(x2, y2, 'k', lw=1.5, linestyle='--')
+        else:
+            angle_array = np.linspace(0, 2*np.pi, 100)
+            x = 1 * np.sin(angle_array)
+            y = 1 * np.cos(angle_array)
+            ax[-1].plot(x, y, 'k', lw=4)
+            
+            ax[-1].text(-SR_scaling+0.1, SR_scaling-0.2, '%d sources ~%2.3g %% ' %(Nsources, perc_sources), fontsize=10,color='k')
+            ax[-1].text(-SR_scaling+0.1, -SR_scaling+0.1, '%d objects ~%2.3g %% ' %(ntot_annulus, 100*ntot_annulus/len(ra1)), fontsize=10,color='k')
+            #ax[-1].text(-SR_scaling+0.1, SR_scaling-0.9, '$\eta$=%2.3g deg$^{-2}$' %(density_annulus), fontsize=8,color='k')
+
+            ax[-1].set_xlabel(r'$\Delta$RA/radii$_{i}$')
+            ax[-1].set_ylabel(r'$\Delta$DEC/radii$_{i}$')
+            
+        ax[-1].set_title(title)
+        ax[-1].axvline(0, ls='--', c='k')
+        ax[-1].axhline(0, ls='--', c='k')
+        if annulus is not None:
+            for i in annulus:
+                x = i * np.sin(angle_array)
+                y = i * np.cos(angle_array)
+                ax[-1].plot(x, y, 'yellow', lw=3, ls='-')
+                
+    if filename is not None:
+            fig.savefig(filename+'.png', bbox_inches = 'tight', pad_inches = 0)
+    
+    if annulus is not None:
+        return d_ra2, d_dec2, annMask
+        
+        
+def search_around(ra1, dec1, ra2, dec2, search_radius=1., verbose=True):
+    '''
+    Using the astropy.coordinates.search_around_sky module to find all pairs within
+    some search radius.
+    Inputs:
+    RA and Dec of two catalogs;
+    search_radius (arcsec);
+    Outputs:
+        idx1, idx2: indices of matched objects in the two catalogs;
+        d2d: angular distances (arcsec);
+        d_ra, d_dec: the differences in RA and Dec (arcsec);
+    '''
+
+    # protect the global variables from being changed by np.sort
+    ra1, dec1, ra2, dec2 = map(np.copy, [ra1, dec1, ra2, dec2])
+
+    # Matching catalogs
+    sky1 = SkyCoord(ra1*u.degree,dec1*u.degree, frame='icrs')
+    sky2 = SkyCoord(ra2*u.degree,dec2*u.degree, frame='icrs')
+    idx1, idx2, d2d, d3d = sky2.search_around_sky(sky1, seplimit=search_radius*u.arcsec)
+    if verbose:
+        print('%d nearby objects ~ %g %%'%(len(idx1), 100*len(idx1)/len(ra2)))
+
+    # convert distances to numpy array in arcsec
+    d2d = np.array(d2d.to(u.arcsec))
+
+
+    d_ra = (ra2[idx2]-ra1[idx1])*3600.    # in arcsec
+    d_dec = (dec2[idx2]-dec1[idx1])*3600. # in arcsec
+    ##### Convert d_ra to actual arcsecs #####
+    mask = d_ra > 180*3600
+    d_ra[mask] = d_ra[mask] - 360.*3600
+    mask = d_ra < -180*3600
+    d_ra[mask] = d_ra[mask] + 360.*3600
+    d_ra = d_ra * np.cos(dec1[idx1]/180*np.pi)
+    ##########################################
+
+    return idx1, idx2, d2d, d_ra, d_dec
+
+def relative_density_plot(d_ra, d_dec, d2d, search_radius, ref_density, nbins=101, return_res=False, 
+                          show=True, ax=plt, d2d_arcsec=None, annulus_min=2, logDenRat=[-3,3], mask_radius=None):
+
+    bins = np.linspace(-search_radius, search_radius, nbins)
+    bin_spacing = bins[1] - bins[0]
+    bincenter = (bins[1:]+bins[:-1])/2
+    mesh_ra, mesh_dec = np.meshgrid(bincenter, bincenter)
+    mesh_d2d = np.sqrt(mesh_ra**2 + mesh_dec**2)
+    if d2d_arcsec is not None:
+        mask = (d2d_arcsec>annulus_min) #to avoid self match with stars
+    else:
+        mask = (d2d>annulus_min) #to avoid self match with stars
+    #taking the 2d histogram and divide by the area of each bin to get the density
+    density, _, _ = np.histogram2d(d_ra[mask], d_dec[mask], bins=bins)/(bin_spacing**2)
+    #ignoring data outside the circle with radius='search radius'
+    #print('Nbins:',len(bins), 'binArea:', bin_spacing**2, 'Nobjects:', len(d_ra[mask]))
+    #pix_density = len(d_ra[mask])/((len(bins)**2)*(bin_spacing**2))
+    #print('tot_density_pix:', pix_density)
+    
+    #mean density at search radius
+    if search_radius < 10:
+        meanmask = np.logical_and(mesh_d2d <= search_radius, mesh_d2d > 1.2)
+    else:
+        meanmask = np.logical_and(mesh_d2d <= search_radius, mesh_d2d > 100.)
+    ref_density = np.mean(density[meanmask])
+    
+    #density profile
+    dist = np.linspace(0., search_radius, nbins)
+    dist2 = np.linspace(0.008, search_radius, nbins/2.)
+    dist_spacing = dist[1] - dist[0]
+    dist_spacing2 = dist2[1] - dist2[0]
+    dpx, dpy, dpx2, dpy2 = [], [], [], []
+    for i, j in enumerate(dist):
+        #for the cumulative radia profile
+        dmask = mesh_d2d <= j
+        drcumu = np.log2(np.mean(density[dmask]/ref_density))
+        if drcumu is np.nan:
+            dpy.append(-1)
+        else:
+            dpy.append(drcumu)
+        dpx.append(j)
+    for i, j in enumerate(dist2[:-1]):
+        #for the no cumulative radia profile
+        dmask2 = np.logical_and(mesh_d2d < dist2[i+1], mesh_d2d >= dist2[i])
+        drnocumu = np.log2(np.mean(density[dmask2]/ref_density))
+        #drnocumu = np.mean(density[dmask2]/ref_density) -1.
+        if drnocumu is np.nan:
+            dpy2.append(-1)
+        else:
+            dpy2.append(drnocumu)
+        dpx2.append(dist2[i] + dist_spacing2/2.)
+    
+    if search_radius < 10:
+        dpy = np.array(dpy)
+        dpy2 = np.array(dpy2)
+        dmax = dpy2[np.array(dpx2) > 1].max()
+        dmin = dpy2[np.array(dpx2) > 1].min()
+        maglimrad = 1
+    else:
+        dpy20 = np.array(dpy2)
+        dpy = np.array(dpy)*search_radius/logDenRat[1]
+        dpy2 = np.array(dpy2)*search_radius/logDenRat[1]
+        dmax = dpy20[np.array(dpx2) > mask_radius].max()
+        dmin = dpy20[np.array(dpx2) > mask_radius].min()
+        maglimrad = mask_radius
+    
+    print('density cumu (min, max): (%2.3g, %2.3g)' %(np.array(dpy).min(), np.array(dpy).max()))
+    print('density non-cumu (min, max): (%2.3g, %2.3g)' %(np.array(dpy2).min(), np.array(dpy2).max()))
+    
+    mask = mesh_d2d >= bins.max()-bin_spacing
+    density[mask] = np.nan
+    #density_ratio = density/ref_density
+    density_ratio = np.log2(density/ref_density)
+    
+    idxinf = np.where(np.isinf(density_ratio))
+    #print('inf values:',density_ratio[idxinf])
+    print('%d of inf in density ratio out of a total of %d' %(len(density_ratio[idxinf]), len(density_ratio[~np.isnan(density_ratio)])))
+    density_ratio[idxinf] = logDenRat[0]
+    #print('inf values AFTER:',density_ratio[idxinf])
+    
+    den_rat = density_ratio[~np.isnan(density_ratio)]
+    denmin = den_rat.min()
+    denmax = den_rat.max()
+    print('Minimum density ratio = %g, Maximum density ratio = %g' %(denmin, denmax))
+    print('----------------')
+    fig = plt.figure(1)
+    #img = ax.imshow(density_ratio.transpose()-1, origin='lower', aspect='equal',
+    img = ax.imshow(density_ratio.transpose(), origin='lower', aspect='equal',
+               cmap='seismic', extent=bins.max()*np.array([-1, 1, -1, 1]), vmin=logDenRat[0], vmax=logDenRat[1])
+    #ax.colorbar(fraction=0.046, pad=0.04)
+    fig.colorbar(img, fraction=0.046, pad=0.04, label=r'$\log_{2}(\eta_{pix}/\eta_{tot})$')
+    #ax.plot(np.array(dpx), dpy, lw=2.5, color='green')
+    ax.plot(np.array(dpx2), dpy2, lw=2.5, color='red')
+    
+    # find the max, min of density ratio profile for distances > 1
+    ax.text(1*search_radius/10., search_radius - 2*search_radius/30, '$max(\eta(\Delta r)/\eta, r>%i)=%2.3g$' %(maglimrad, 2**(dmax)), fontsize=10,color='k')
+    #ax.text(4*search_radius/10., search_radius - 4*search_radius/30, '$min(\eta(\delta r)/\eta)=%2.3g$' %(2**(dmin)), fontsize=10,color='k')
+    
+    ax.set_ylim(-search_radius, search_radius)
+    if show:
+        ax.show()
+
+    if return_res:
+        return bins, mesh_d2d, density_ratio
+    
+def limits():
+    
+    limits = {}
+    limits['Grr'] = (-3, 5)
+    limits['g-z'] = (-1.8, 6)
+    limits['r'] = (15, 20.1)
+    limits['rfibmag'] = (16, 26)
+    limits['g-r'] = (-0.5, 2.3)
+    limits['r-z'] = (-0.7, 2.8)
+    
+    return limits
+
+def hexbin(coord, catmask, n, C=None, bins=None, title=None, cmap='viridis', ylab=True, xlab=True, vline=None, 
+           hline=None, fig=None, gs=None, xlim=None, ylim=None, vmin=None, vmax=None, mincnt=1, fmcline=False, 
+               file=None, gridsize=(60,60), comp=False, fracs=False, area=None):
+    
+    x, y = coord.keys()
+    
+    ax = fig.add_subplot(gs[n])
+    if title is not None: ax.set_title(r'%s' %(title), size=20)
+    if xlim is None: xlim = limits()[x]
+    if ylim is None: ylim = limits()[y]
+    masklims = (coord[x] > xlim[0]) & (coord[x] < xlim[1]) & (coord[y] > ylim[0]) & (coord[y] < ylim[1])
+    
+    if catmask is None: keep = masklims
+    else: keep = (catmask) & (masklims)
+        
+    Ntot = np.sum((catmask) & (masklims))
+        
+    if hline is not None:
+        maskhigh = (masklims) & (coord[y] > hline) & (catmask)
+        masklow = (masklims) & (coord[y] < hline) & (catmask)
+        maskgal = (~masklow) & (catmask)
+        
+    pos = ax.hexbin(coord[x][keep], coord[y][keep], C=C, gridsize=gridsize, cmap=cmap, 
+                    vmin=vmin, vmax=vmax, bins=bins, mincnt=mincnt, alpha=0.8)
+    
+    dx = np.abs(xlim[1] - xlim[0])/15.
+    dy = np.abs(ylim[1] - ylim[0])/15.
+    if comp: ax.text(xlim[0]+dx, ylim[1]-dy, r'comp. %2.3g %%' %(100 * np.sum(pos.get_array())/np.sum(keep)), size=15)
+    if fracs: 
+        ax.text(xlim[1]-5*dx, ylim[1]-dy, r'Ntot. %i' %(Ntot), size=15)
+        if area is not None: ax.text(xlim[1]-5*dx, ylim[1]-2*dy, r'$\eta$. %.2f/deg$^2$' %(Ntot/area), size=15)
+        ax.text(xlim[0]+dx, ylim[1]-dy, r'f.gal. %.2f %%' %(100 * np.sum(maskhigh)/Ntot), size=15)
+        ax.text(xlim[0]+dx, ylim[0]+dy, r'f.stars. %.2f %%' %(100 * np.sum(masklow)/Ntot), size=15)
+    if ylab: ax.set_ylabel(r'%s' %(y), size=20)
+    if xlab: ax.set_xlabel(r'%s' %(x), size=20)
+    if hline is not None: ax.axhline(hline, ls='--', lw=2, c='r')
+    if vline is not None: ax.axvline(vline, ls='--', lw=2, c='r')
+    if fmcline: 
+        x_N1 = np.linspace(15.5, 17.1, 4)
+        ax.plot(x_N1, 2.9 + 1.2 + x_N1, color='r', ls='--', lw=2)
+        x_N2 = np.linspace(17.1, 18.3, 4)
+        ax.plot(x_N2, x_N2*0.+21.2, color='r', ls='--', lw=2)
+        x_N3 = np.linspace(18.3, 20.1, 4)
+        ax.plot(x_N3, 2.9 + x_N3, color='r', ls='--', lw=2)
+        
+        FMC = np.zeros_like(coord[x], dtype='?')
+        FMC |= ((coord[y] < (2.9 + 1.2) + coord[x]) & (coord[x] < 17.1))
+        FMC |= ((coord[y] < 21.2) & (coord[x] < 18.3) & (coord[x] > 17.1))
+        FMC |= ((coord[y] < 2.9 + coord[x]) & (coord[x] > 18.3))
+        
+        maskhigh = (~FMC) & (catmask)
+        masklow = (FMC) & (catmask)
+        ax.text(xlim[1]-8*dx, ylim[1]-dy, r'Ntot. %i' %(Ntot), size=15)
+        if area is not None: ax.text(xlim[1]-8*dx, ylim[1]-2*dy, r'$\eta$. %.2f/deg$^2$' %(Ntot/area), size=15)
+        ax.text(xlim[1]-5*dx, ylim[0]+dy, r'f.kept. %.2f %%' %(100 * np.sum(masklow)/Ntot), size=15)
+        ax.text(xlim[0]+dx, ylim[1]-dy, r'f.rej. %.2f %%' %(100 * np.sum(maskhigh)/Ntot), size=15)
+        
+    #if bins is not None: clab = r'$\log(N)$'
+    clab = r'$N$'
+    fig.colorbar(pos, ax=ax, label=clab, orientation="horizontal", pad=0.15)
+    ax.set_xlim(xlim[0], xlim[1])
+    ax.set_ylim(ylim[0], ylim[1])
+    
+    if file is not None:
+        fig.savefig(file+'.png', bbox_inches = 'tight', pad_inches = 0)
